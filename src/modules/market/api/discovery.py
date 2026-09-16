@@ -1,4 +1,5 @@
 import logging
+import asyncio
 import time
 
 import httpx
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 _cache: dict[str, tuple[float, object]] = {}
+DISCOVERY_LIVE_TIMEOUT_SECONDS = 3.0
 
 
 def _resolve_proxy() -> str:
@@ -118,7 +120,10 @@ async def _hot_stocks_live_or_snapshot(
 ) -> list[dict]:
     mkt = _normalize_market(market)
     try:
-        items = await collector.fetch_hot_stocks(market=mkt, mode=mode, limit=limit)
+        items = await asyncio.wait_for(
+            collector.fetch_hot_stocks(market=mkt, mode=mode, limit=limit),
+            timeout=DISCOVERY_LIVE_TIMEOUT_SECONDS,
+        )
         data = [
             {
                 "symbol": it.symbol,

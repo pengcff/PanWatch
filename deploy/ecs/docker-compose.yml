@@ -1,0 +1,15 @@
+services:
+  panwatch:
+    image: sunxiao0721/panwatch:0.13.2
+    container_name: panwatch
+    ports:
+      - "8000:8000"
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - panwatch_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  panwatch_data:
+    name: panwatch_data
