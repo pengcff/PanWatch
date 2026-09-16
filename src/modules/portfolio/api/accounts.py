@@ -22,6 +22,7 @@ router = APIRouter()
 _hkd_rate_cache: dict = {"rate": 0.92, "ts": 0}  # 港币默认汇率 0.92
 _usd_rate_cache: dict = {"rate": 7.25, "ts": 0}  # 美元默认汇率 7.25
 EXCHANGE_RATE_TTL = 3600  # 1 小时缓存
+EXCHANGE_RATE_FAILURE_COOLDOWN = 60  # 上游失败后 1 分钟内使用缓存
 
 
 def get_hkd_cny_rate() -> float:
@@ -29,7 +30,11 @@ def get_hkd_cny_rate() -> float:
     global _hkd_rate_cache
 
     # 检查缓存
-    if time.time() - _hkd_rate_cache["ts"] < EXCHANGE_RATE_TTL:
+    now = time.time()
+    if (
+        now - _hkd_rate_cache["ts"] < EXCHANGE_RATE_TTL
+        or now - _hkd_rate_cache.get("failure_ts", 0) < EXCHANGE_RATE_FAILURE_COOLDOWN
+    ):
         return _hkd_rate_cache["rate"]
 
     # 从新浪财经获取汇率
@@ -49,12 +54,14 @@ def get_hkd_cny_rate() -> float:
             parts = data.split(",")
             if len(parts) > 1:
                 rate = float(parts[1])
-                _hkd_rate_cache = {"rate": rate, "ts": time.time()}
+                _hkd_rate_cache = {"rate": rate, "ts": time.time(), "failure_ts": 0}
                 logger.info(f"更新港币汇率: {rate}")
                 return rate
     except Exception as e:
         logger.warning(f"获取港币汇率失败，使用缓存: {e}")
 
+    # 失败也要更新时间戳，避免上游故障时每次汇总请求都阻塞等待网络。
+    _hkd_rate_cache["failure_ts"] = time.time()
     return _hkd_rate_cache["rate"]
 
 
@@ -63,7 +70,11 @@ def get_usd_cny_rate() -> float:
     global _usd_rate_cache
 
     # 检查缓存
-    if time.time() - _usd_rate_cache["ts"] < EXCHANGE_RATE_TTL:
+    now = time.time()
+    if (
+        now - _usd_rate_cache["ts"] < EXCHANGE_RATE_TTL
+        or now - _usd_rate_cache.get("failure_ts", 0) < EXCHANGE_RATE_FAILURE_COOLDOWN
+    ):
         return _usd_rate_cache["rate"]
 
     # 从新浪财经获取汇率
@@ -83,12 +94,14 @@ def get_usd_cny_rate() -> float:
             parts = data.split(",")
             if len(parts) > 1:
                 rate = float(parts[1])
-                _usd_rate_cache = {"rate": rate, "ts": time.time()}
+                _usd_rate_cache = {"rate": rate, "ts": time.time(), "failure_ts": 0}
                 logger.info(f"更新美元汇率: {rate}")
                 return rate
     except Exception as e:
         logger.warning(f"获取美元汇率失败，使用缓存: {e}")
 
+    # 失败也要更新时间戳，避免上游故障时每次汇总请求都阻塞等待网络。
+    _usd_rate_cache["failure_ts"] = time.time()
     return _usd_rate_cache["rate"]
 
 
@@ -429,12 +442,15 @@ def get_portfolio_summary(
     stocks = db.query(Stock).filter(Stock.id.in_(all_stock_ids)).all() if all_stock_ids else []
     stock_map = {s.id: s for s in stocks}
 
-    # 获取实时行情（可选）
-    quotes = _fetch_quotes_for_stocks(stocks) if include_quotes else {}
-
-    # 获取汇率
-    hkd_rate = get_hkd_cny_rate()
-    usd_rate = get_usd_cny_rate()
+    # 获取实时行情和汇率（可选）。禁用行情时只使用本地缓存，保证汇总不触网。
+    if include_quotes:
+        quotes = _fetch_quotes_for_stocks(stocks)
+        hkd_rate = get_hkd_cny_rate()
+        usd_rate = get_usd_cny_rate()
+    else:
+        quotes = {}
+        hkd_rate = _hkd_rate_cache["rate"]
+        usd_rate = _usd_rate_cache["rate"]
 
     # 计算各账户持仓
     account_summaries = []

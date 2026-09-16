@@ -101,6 +101,8 @@ const MARKET_BAR_CLS: Record<string, string> = {
 export default function DashboardPage() {
   const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
+  const [portfolioLoading, setPortfolioLoading] = useState(true)
+  const [portfolioError, setPortfolioError] = useState(false)
   const [indices, setIndices] = useState<DashboardMarketIndex[]>([])
   const [scan, setScan] = useState<DashboardMonitorStock[]>([])
   const [overview, setOverview] = useState<DashboardOverviewResponse | null>(null)
@@ -148,24 +150,28 @@ export default function DashboardPage() {
 
   const load = useCallback(async () => {
     setLoading(true)
+    setPortfolioLoading(true)
+    setPortfolioError(false)
     // 指数 pills:独立加载不阻塞首屏(spark 冷启动可能 ~1s,数据到了自然浮现)
     dashboardApi.indices().then(setIndices).catch(() => {})
     // 快车道:DB/轻量查询,先让首屏(要紧事/体检分布/组合速览)尽快出来
-    const [sc, ov, dg, ht, td, ps, ms] = await Promise.allSettled([
+    const portfolioPromise = Promise.allSettled([portfolioApi.diagnostics(), dashboardApi.portfolioSummary()]).then(([dg, ps]) => {
+      if (dg.status === 'fulfilled') setDiag(dg.value)
+      if (ps.status === 'fulfilled') setPortfolioSummary(ps.value)
+      setPortfolioError(dg.status === 'rejected' && ps.status === 'rejected')
+      setPortfolioLoading(false)
+    })
+    const [sc, ov, ht, td, ms] = await Promise.allSettled([
       dashboardApi.intradayScan(),
       dashboardApi.overview({ market: 'ALL', action_limit: 6, risk_limit: 6 }),
-      portfolioApi.diagnostics(),
       homeApi.alertHitsToday(),
       homeApi.todos(),
-      dashboardApi.portfolioSummary(),
       dashboardApi.marketStatus(),
     ])
     if (sc.status === 'fulfilled') setScan(sc.value.stocks || [])
     if (ov.status === 'fulfilled') setOverview(ov.value)
-    if (dg.status === 'fulfilled') setDiag(dg.value)
     if (ht.status === 'fulfilled') setAlertHits(ht.value)
     if (td.status === 'fulfilled') setTodos(td.value.todos || [])
-    if (ps.status === 'fulfilled') setPortfolioSummary(ps.value)
     if (ms.status === 'fulfilled') setMarketStatus(ms.value)
     setLoading(false) // 首屏不再等基准/归因(要拉全持仓 K 线)
     setRefreshedAt(new Date())
@@ -180,6 +186,7 @@ export default function DashboardPage() {
 
     // 慢车道:基准/归因需拉全持仓 K 线(分钟级),独立加载,就绪后回填超额/归因
     loadBench()
+    void portfolioPromise
 
     // 盘前/盘后简报:独立加载,取较新一条
     Promise.allSettled([dashboardApi.brief('premarket'), dashboardApi.brief('eod')]).then((res) => {
@@ -285,7 +292,9 @@ export default function DashboardPage() {
     const dd = String(d.getDate()).padStart(2, '0')
     return `${d.getFullYear()}-${mm}-${dd}`
   }, [])
-  const hasHoldings = (diag?.position_count ?? 0) > 0
+  const hasHoldings = diag
+    ? diag.position_count > 0
+    : (portfolioSummary?.accounts || []).some((account) => account.positions.length > 0)
   const benchReady = bench && !bench.empty && bench.excess_return != null
   const hasWatchlist = (overview?.kpis?.watchlist_count ?? 0) > 0
   const portfolioPnlPct =
@@ -353,7 +362,7 @@ export default function DashboardPage() {
       <div className="card mb-3 p-4">
         {!hasHoldings ? (
           <div className="py-4 text-center text-[12px] text-muted-foreground">
-            {loading ? '加载中…' : '暂无持仓,添加持仓后这里展示今日盈亏与组合走势'}
+            {portfolioLoading ? '组合摘要加载中…' : portfolioError ? '组合摘要暂时不可用' : '暂无持仓,添加持仓后这里展示今日盈亏与组合走势'}
           </div>
         ) : (
           <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
@@ -365,8 +374,8 @@ export default function DashboardPage() {
             <div className="hidden h-9 w-px bg-border/60 sm:block" />
             <div>
               <div className="text-[11px] text-muted-foreground">累计浮盈</div>
-              <div className={`font-mono text-[14px] ${moveColor(diag!.total_unrealized_pnl)}`}>
-                {fmtMoney(diag!.total_unrealized_pnl)} <span className="text-[11px]">{pct(portfolioPnlPct)}</span>
+              <div className={`font-mono text-[14px] ${moveColor(diag?.total_unrealized_pnl)}`}>
+                {fmtMoney(diag?.total_unrealized_pnl)} <span className="text-[11px]">{pct(portfolioPnlPct)}</span>
               </div>
             </div>
             <div>
@@ -502,7 +511,7 @@ export default function DashboardPage() {
                 成绩单
               </button>
             )}
-            {hasHoldings && (
+            {hasHoldings && diag && (
               <button
                 type="button"
                 onClick={() => setShareDiag(true)}
@@ -514,7 +523,11 @@ export default function DashboardPage() {
               </button>
             )}
           </div>
-          {!hasHoldings ? (
+          {portfolioLoading && !diag ? (
+            <div className="py-6 text-center text-[12px] text-muted-foreground">组合体检加载中…</div>
+          ) : portfolioError && !diag ? (
+            <div className="py-6 text-center text-[12px] text-muted-foreground">组合体检暂时不可用</div>
+          ) : !hasHoldings ? (
             <div className="py-6 text-center text-[12px] text-muted-foreground">
               {loading ? '加载中…' : '暂无持仓,添加持仓后这里给风险与相对大盘表现'}
             </div>
@@ -564,9 +577,9 @@ export default function DashboardPage() {
               )}
 
               <div className="flex justify-between">
-                <span className="text-muted-foreground">持仓 {diag!.position_count} 只 · 最大单仓</span>
-                <span className={`font-mono ${diag!.max_weight >= 0.4 ? 'text-amber-600' : ''}`}>
-                  {(diag!.max_weight * 100).toFixed(0)}%
+                <span className="text-muted-foreground">持仓 {diag?.position_count ?? 0} 只 · 最大单仓</span>
+                <span className={`font-mono ${(diag?.max_weight ?? 0) >= 0.4 ? 'text-amber-600' : ''}`}>
+                  {((diag?.max_weight ?? 0) * 100).toFixed(0)}%
                 </span>
               </div>
 
@@ -617,9 +630,9 @@ export default function DashboardPage() {
                   )
                 })}
 
-              {diag!.alerts.length > 0 ? (
+              {(diag?.alerts || []).length > 0 ? (
                 <div className="space-y-1 pt-1">
-                  {diag!.alerts.map((a, i) => (
+                  {(diag?.alerts || []).map((a, i) => (
                     <div key={i} className="flex items-start gap-1 text-[11px] text-amber-600">
                       <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
                       <span>{a}</span>

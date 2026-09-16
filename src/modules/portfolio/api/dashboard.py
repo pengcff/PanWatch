@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -390,6 +391,7 @@ def get_dashboard_overview(
 
 
 logger = logging.getLogger(__name__)
+CURATE_AI_TIMEOUT_SECONDS = 8.0
 
 
 # ── 今日必读 AI 策展(Phase C)────────────────────────────────────────────
@@ -429,8 +431,11 @@ async def curate_today(req: CurateRequest, db: Session = Depends(get_db)):
 
     items: list[dict] = []
     try:
-        content = await get_configured_failover_client(db, req.model_id).chat(
-            system_prompt, user_content, temperature=0.3
+        content = await asyncio.wait_for(
+            get_configured_failover_client(db, req.model_id).chat(
+                system_prompt, user_content, temperature=0.3
+            ),
+            timeout=CURATE_AI_TIMEOUT_SECONDS,
         )
         for line in (content or "").splitlines():
             parts = line.split("|")
